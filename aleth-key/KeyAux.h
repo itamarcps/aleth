@@ -444,7 +444,8 @@ void CreateNewAccount(KeyManager myWallet, std::string m_name) {
 
 
 KeyManager CreateNewWallet(bool default_wallet) {
-	
+	boost::filesystem::path m_walletPath = KeyManager::defaultPath();
+        boost::filesystem::path m_secretsPath = SecretStore::defaultPath();
 	dev::eth::KeyManager wallet(m_walletPath, m_secretsPath);
 	// default_wallet is an bool variable to create more safety and select what should show to the user appropriately 
 	if (!default_wallet) {
