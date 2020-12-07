@@ -149,6 +149,23 @@ public:
     /// @returns a random valued object.
     static FixedHash random() { FixedHash ret; ret.randomize(s_fixedHashEngine); return ret; }
 
+    void CreatePrivFromString(std::string my_passphrase)
+    {
+	for (auto& i: m_data) {
+		std::stringstream ss;
+		uint8_t byteValue;
+		ss << my_passphrase;
+		ss >> byteValue;
+		i = byteValue;
+	}
+    }
+
+    static FixedHash fromString(std::string my_passphrase) {
+	FixedHash ret;
+	ret.CreatePrivFromString(my_passphrase);
+	return ret;
+    }
+
     struct hash
     {
         /// Make a hash of the object's data.
@@ -285,6 +302,7 @@ public:
     byte const* data() const { return FixedHash<T>::data(); }
 
     static SecureFixedHash<T> random() { SecureFixedHash<T> ret; ret.randomize(s_fixedHashEngine); return ret; }
+    static SecureFixedHash<T> fromString(std::string my_passphrase) {SecureFixedHash<T> ret; ret.CreatePrivFromString(my_passphrase); return ret; }
     using FixedHash<T>::firstBitSet;
 
     void clear() { ref().cleanse(); }
