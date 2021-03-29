@@ -109,7 +109,7 @@ public:
 	void kill(h128 const& _id) { kill(address(_id)); }
 	void kill(Address const& _a);
 
-	static boost::filesystem::path defaultPath() { return getDataDir("ethereum") / boost::filesystem::path("keys.info"); }
+	static boost::filesystem::path defaultPath() { return getDataDir("ProcProc") / boost::filesystem::path("keys.info"); }
 
 	/// Extracts the secret key from the presale wallet.
 	static KeyPair presaleSecret(std::string const& _json, std::function<std::string(bool)> const& _password);

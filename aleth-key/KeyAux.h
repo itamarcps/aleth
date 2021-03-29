@@ -21,7 +21,11 @@
 #include <fstream>
 #include <iosfwd>
 #include <thread>
-
+#include <boost/thread.hpp>
+#include <mutex>
+#include <atomic>
+#include <boost/lexical_cast.hpp>
+#include <json_spirit/JsonSpiritHeaders.h>
 using namespace std;
 using namespace dev;
 using namespace dev::eth;
@@ -34,6 +38,79 @@ boost::filesystem::path m_secretsPath;
 class BadArgument: public Exception {};
 unique_ptr<SecretStore> m_secretStore;
 unique_ptr<KeyManager> m_keyManager;
+
+std::atomic_bool stop_thread(false);
+std::atomic_bool target_changed(false);
+std::atomic_bool work_changed(false);
+std::atomic_bool work_submitted(false);
+
+int64_t hashes_timer = 1000000;
+
+json_spirit::mValue objectItem(
+  const json_spirit::mValue element, const std::string name
+) {
+  return element.get_obj().at(name);
+}
+
+json_spirit::mValue arrayItem(
+  const json_spirit::mValue element, size_t index
+) {
+  return element.get_array().at(index);
+}
+
+template <typename ElemT>
+struct HexTo {
+  ElemT value;
+  operator ElemT() const { return value; }
+  friend std::istream& operator>>(std::istream& in, HexTo& out) {
+    in >> std::hex >> out.value;
+    return in;
+  }
+};
+
+class safeWork {
+    public:
+        void get(std::string& setMe) {
+            safeWork_lock.lock();
+            setMe = safeWork_;
+            safeWork_lock.unlock();
+        }
+
+        void set(const std::string setThis) {
+            safeWork_lock.lock();
+            safeWork_ = setThis;
+            safeWork_lock.unlock();
+        }
+    private:
+        std::string safeWork_ = "";
+        std::mutex safeWork_lock;
+};
+
+class MiningStatus {
+	public:
+		std::mutex statusLock;
+		int CoresRunning = 0;
+		std::string AverageHash = "0.0";
+		u256 solutionsFound = 0;
+};
+
+class safeTarget {
+    public:
+        void get(u256& setMe) {
+            safeTarget_lock.lock();
+            setMe = safeTarget_;
+            safeTarget_lock.unlock();
+        }
+
+        void set(const u256 setThis) {
+            safeTarget_lock.lock();
+            safeTarget_ = setThis;
+            safeTarget_lock.unlock();
+        }
+    private:
+        u256 safeTarget_ = 0;
+        std::mutex safeTarget_lock;
+};
 
 // Select the appropriate address stored in the KeyManager from user input string.
 
@@ -313,13 +390,102 @@ std::string GetETHBalance (std::string myAddress) {
 // Loads and show to the user the addresses that his wallet contains
 // Also asks for the Etherscan API to get the balances from these addresses.
 
-void ListETHAddresses(KeyManager mywallet) {
+std::string GetProcProcBalance (std::string myAddress) {
+	std::string balance;
+	
+	std::stringstream query;
+	
+	query << "/api?module=account&action=tokenbalance&contractaddress=0x407DcE91060Ee45dE7b8B7013Ea1f323ec4285FC&address=";
+	query << myAddress;
+	query << "&tag=latest&apikey=6342MIVP4CD1ZFDN3HEZZG4QB66NGFZ6RZ";
+	
+	balance = httpGetRequest(query.str());
+
+	std::vector<std::string> jsonResult = GetJSONValue(balance, "result");
+	balance = jsonResult[0];
+	
+	balance.pop_back();
+	balance.erase(0,10);
+	
+	balance = convertToFixedPointString(balance, 18);
+
+	return balance;
+}
+
+// Here is were it starts to become tricky, tokens needs to be loaded differently and from their proper contract address, beside the wallet address.
+
+void ListProcProcAddresses(KeyManager mywallet) {
 	
 	std::vector<std::string> WalletList;
 	std::vector<std::string> AddressList;
 	if (mywallet.store().keys().empty())
 	{
 		cout << "No keys found." << endl;
+	} else {
+		vector<u128> bare;
+			AddressHash got;
+			for (auto const& u: mywallet.store().keys())
+				if (Address a = mywallet.address(u))
+				{
+					std::stringstream buffer;
+					std::stringstream addressbuffer;
+					got.insert(a);
+					buffer << toUUID(u) << " " << a.abridged();
+					buffer << " " << "0x" << a << " ";
+					addressbuffer << "0x" << a;
+					buffer << " " << mywallet.accountName(a);
+					WalletList.push_back(buffer.str());
+					AddressList.push_back(addressbuffer.str());
+				}
+				else
+					bare.push_back(u);
+			for (auto const& u: bare)
+				cout << toUUID(u) << " (Bare)" << endl;
+	}
+	
+	for (std::size_t i = 0; i < AddressList.size(); ++i) {
+		WalletList[i] += GetProcProcBalance(AddressList[i]);
+		WalletList[i] += "\n";
+	}
+	
+	for (auto a : WalletList)
+		std::cout << a;
+	std::cout << std::endl;
+
+	return;
+}
+
+
+// Create an new Account (Address) on the user wallet, and encrypts it
+
+
+void CreateNewAccount(KeyManager myWallet, std::string m_name) {
+
+	std::string m_lock;
+	std::string m_lockHint;
+	m_lock = createPassword("Enter a passphrase with which to secure this account");
+	auto k = makeKey();
+	bool usesMaster = m_lock.empty();
+	h128 u = usesMaster ? myWallet.import(k.secret(), m_name) : myWallet.import(k.secret(), m_name, m_lock, m_lockHint);
+	cout << "Created key " << toUUID(u) << endl;
+	cout << "  Name: " << m_name << endl;
+	if (usesMaster)
+		cout << "  Uses master passphrase." << endl;
+	else
+		cout << "  Password hint: " << m_lockHint << endl;
+	cout << "  Address: " << k.address().hex() << endl;
+	
+
+}
+
+void ListETHAddresses(KeyManager mywallet) {
+	
+	std::vector<std::string> WalletList;
+	std::vector<std::string> AddressList;
+	if (mywallet.store().keys().empty())
+	{
+		cout << "No account found. Creating an new Miner wallet." << std::endl;
+		CreateNewAccount(mywallet, "Miner");
 	} else {
 		vector<u128> bare;
 			AddressHash got;
@@ -354,95 +520,6 @@ void ListETHAddresses(KeyManager mywallet) {
 	return;
 }
 
-std::string GetTAEXBalance (std::string myAddress) {
-	std::string balance;
-	
-	std::stringstream query;
-	
-	query << "/api?module=account&action=tokenbalance&contractaddress=0x9c19d746472978750778f334b262de532d9a85f9&address=";
-	query << myAddress;
-	query << "&tag=latest&apikey=6342MIVP4CD1ZFDN3HEZZG4QB66NGFZ6RZ";
-	
-	balance = httpGetRequest(query.str());
-
-	std::vector<std::string> jsonResult = GetJSONValue(balance, "result");
-	balance = jsonResult[0];
-	
-	balance.pop_back();
-	balance.erase(0,10);
-	
-	balance = convertToFixedPointString(balance, 4);
-
-	return balance;
-}
-
-// Here is were it starts to become tricky, tokens needs to be loaded differently and from their proper contract address, beside the wallet address.
-
-void ListTAEXAddresses(KeyManager mywallet) {
-	
-	std::vector<std::string> WalletList;
-	std::vector<std::string> AddressList;
-	if (mywallet.store().keys().empty())
-	{
-		cout << "No keys found." << endl;
-	} else {
-		vector<u128> bare;
-			AddressHash got;
-			for (auto const& u: mywallet.store().keys())
-				if (Address a = mywallet.address(u))
-				{
-					std::stringstream buffer;
-					std::stringstream addressbuffer;
-					got.insert(a);
-					buffer << toUUID(u) << " " << a.abridged();
-					buffer << " " << "0x" << a << " ";
-					addressbuffer << "0x" << a;
-					buffer << " " << mywallet.accountName(a);
-					WalletList.push_back(buffer.str());
-					AddressList.push_back(addressbuffer.str());
-				}
-				else
-					bare.push_back(u);
-			for (auto const& u: bare)
-				cout << toUUID(u) << " (Bare)" << endl;
-	}
-	
-	for (std::size_t i = 0; i < AddressList.size(); ++i) {
-		WalletList[i] += GetTAEXBalance(AddressList[i]);
-		WalletList[i] += "\n";
-	}
-	
-	for (auto a : WalletList)
-		std::cout << a;
-	std::cout << std::endl;
-
-	return;
-}
-
-
-// Create an new Account (Address) on the user wallet, and encrypts it
-
-
-void CreateNewAccount(KeyManager myWallet, std::string m_name) {
-
-	std::string m_lock;
-	std::string m_lockHint;
-	m_lock = createPassword("Enter a passphrase with which to secure this account (or nothing to use the master passphrase): ");
-	auto k = makeKey();
-	bool usesMaster = m_lock.empty();
-	h128 u = usesMaster ? myWallet.import(k.secret(), m_name) : myWallet.import(k.secret(), m_name, m_lock, m_lockHint);
-	cout << "Created key " << toUUID(u) << endl;
-	cout << "  Name: " << m_name << endl;
-	if (usesMaster)
-		cout << "  Uses master passphrase." << endl;
-	else
-		cout << "  Password hint: " << m_lockHint << endl;
-	cout << "  Address: " << k.address().hex() << endl;
-
-
-}
-
-
 KeyManager CreateNewWallet(bool default_wallet) {
 	boost::filesystem::path m_walletPath = KeyManager::defaultPath();
         boost::filesystem::path m_secretsPath = SecretStore::defaultPath();
@@ -453,10 +530,10 @@ KeyManager CreateNewWallet(bool default_wallet) {
 	} else {
 		std::cout << "Please inform what you are looking to do with your wallet\n2 - Load an existing one in different location\n3 - Create new wallet in different location" << std::endl;
 	}
-	int user_answer = 0;
-	std::cin >> user_answer;
+	std::string user_answer;
+	std::getline(std::cin, user_answer);
 	std::string m_masterPassword;
-	if (user_answer == 1 && !default_wallet) {
+	if (user_answer == "1" && !default_wallet) {
 		
 		
 		if (m_masterPassword.empty())
@@ -470,10 +547,7 @@ KeyManager CreateNewWallet(bool default_wallet) {
 			cerr << "unable to create wallet" << endl << boost::diagnostic_information(_e);
 		}
 
-	} else if (user_answer == 2) {
-		// Clean std::cin from verbose information
-		std::cin.clear();
-		cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+	} else if (user_answer == "2") {
 		std::cout << "Please inform the full path for your wallet" << std::endl;
 		std::string wallet_path;
 		std::getline(std::cin, wallet_path);
@@ -486,10 +560,7 @@ KeyManager CreateNewWallet(bool default_wallet) {
 		KeyManager new_wallet(m_walletPath, m_secretsPath);
 		wallet = new_wallet;
 		
-	} else if (user_answer == 3) {
-		// Clean std::cin from verbose information
-		std::cin.clear();
-		std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+	} else if (user_answer == "3") {
 		std::cout << "Please inform the full path for your wallet" << std::endl;
 		std::string wallet_path;
 		std::getline(std::cin, wallet_path);
@@ -539,9 +610,7 @@ void EraseAccount (KeyManager myWallet) {
 	
 	std::string address;
 	std::cout << "Please inform which address you are looking to delete" << std::endl;
-	
-	std::string flush;
-	std::getline(std::cin, flush);
+
 	std::getline(std::cin, address);
 	
 	if (Address a = userToAddress(address, myWallet)) {
@@ -609,10 +678,7 @@ void SignETHTransaction(KeyManager myWallet) {
 	std::string txgasprice;
 	std::string txvalue;
 	TransactionSkeleton m_toSign;
-	std::string flush;
-	cin.clear();
-	fflush(stdin);
-	std::getline(std::cin, flush);
+
 	std::cout << "Please provide from which wallet you will be sending, provide the wallet address!" << std::endl;
 	std::getline(std::cin, m_signKey);
 	
@@ -685,7 +751,7 @@ void SignETHTransaction(KeyManager myWallet) {
 	
 	std::string transactionLink = SendETHTransaction(transactionHex);
 	
-	while (transactionLink.find("Transaction nonce is too low")  != std::string::npos || transactionLink.find("Transaction with the same hash was already imported")  != std::string::npos) {
+	while (transactionLink.find("Transaction nonce is too low")  != std::string::npos || transactionLink.find("Transaction with the same hash was already imported")  != std::string::npos || transactionLink.find("There is another transaction with same nonce") != std::string::npos) {
 		std::cout << "Transaction nonce is too low. trying again with higher..." << std::endl;
 		txHexBuffer.str(std::string());
 		std::cout << "TxNonce: " << TxNonce << std::endl;
@@ -750,20 +816,96 @@ void SignETHTransaction(KeyManager myWallet) {
 	return txdata;
 
 }
-
-void SignTAEXTransaction(KeyManager myWallet) {
+void SignWorkTransaction(Secret &s, std::string m_signKey, std::string solution) {
 	std::string password;
-	std::string m_signKey;
-	std::string destwallet;
-	std::string contractwallet = "9c19d746472978750778f334b262de532d9a85f9";
+	std::string contractwallet = "407DcE91060Ee45dE7b8B7013Ea1f323ec4285FC";
 	std::string txgas;
 	std::string txgasprice;
 	std::string txvalue;
 	TransactionSkeleton m_toSign;
-	std::string flush;
-	cin.clear();
-	fflush(stdin);
-	std::getline(std::cin, flush);
+	
+	txgas = "75000";
+	txgasprice = "20000000000";
+	
+	int TxNonce;
+	std::stringstream query;
+	
+	query << "/api?module=proxy&action=eth_getTransactionCount&address=0x";
+	query << m_signKey;
+	query << "&tag=latest&apikey=6342MIVP4CD1ZFDN3HEZZG4QB66NGFZ6RZ";
+	
+	std::string nonceRequest = httpGetRequest(query.str());
+
+	std::vector<std::string> jsonResult = GetJSONValue(nonceRequest, "result");
+	jsonResult[0].pop_back();
+	jsonResult[0].erase(0,10);
+
+	std::stringstream nonceStrm;
+	nonceStrm << std::hex << jsonResult[0];
+	
+	nonceStrm >> TxNonce;
+	
+	m_toSign.nonce = TxNonce;
+	m_toSign.creation = false;
+	m_toSign.to = toAddress(contractwallet);
+	m_toSign.data = fromHex("0xc4c11523" + solution);
+	m_toSign.gas = u256(txgas);
+	m_toSign.gasPrice = u256(txgasprice);
+	m_toSign.value = u256(0);
+	
+	std::stringstream txHexBuffer;
+	std::cout << "Signing transaction" << std::endl;
+	try
+	{
+		TransactionBase t = TransactionBase(m_toSign);
+		t.setNonce(TxNonce);
+		t.sign(s);
+		txHexBuffer << toHex(t.rlp());
+	}
+	catch (Exception& ex)
+	{
+		cerr << "Invalid transaction: " << ex.what() << endl;
+	}
+	
+	std::string transactionHex = txHexBuffer.str();
+	
+	std::string transactionLink = SendETHTransaction(transactionHex);
+	
+	while (transactionLink.find("Transaction nonce is too low")  != std::string::npos || transactionLink.find("Transaction with the same hash was already imported")  != std::string::npos || transactionLink.find("There is another transaction with same nonce") != std::string::npos) {
+		txHexBuffer.str(std::string());
+		++TxNonce;
+		m_toSign.nonce = TxNonce;
+		try
+		{
+			TransactionBase t = TransactionBase(m_toSign);
+			t.setNonce(TxNonce);
+			t.sign(s);
+			txHexBuffer << toHex(t.rlp());
+		}
+		catch (Exception& ex)
+		{
+			cerr << "Invalid transaction: " << ex.what() << endl;
+		}
+		std::string transactionHex = txHexBuffer.str();
+		std::string transactionLink = SendETHTransaction(transactionHex);
+	}
+	
+	
+	std::cout << "Transaction signed! Link: " << transactionLink << std::endl;
+	
+	return;
+}
+
+
+void SignProcProcTransaction(KeyManager myWallet) {
+	std::string password;
+	std::string m_signKey;
+	std::string destwallet;
+	std::string contractwallet = "407DcE91060Ee45dE7b8B7013Ea1f323ec4285FC";
+	std::string txgas;
+	std::string txgasprice;
+	std::string txvalue;
+	TransactionSkeleton m_toSign;
 	std::cout << "Please provide from which wallet you will be sending, provide the wallet address!" << std::endl;
 	std::getline(std::cin, m_signKey);
 	
@@ -780,11 +922,11 @@ void SignTAEXTransaction(KeyManager myWallet) {
 		txgasprice = "2500000000";
 	}
 	
-	std::cout << "Please provide how much TAEX you are looking to send. remember max 4 digits!" << std::endl;
+	std::cout << "Please provide how much ProcProc you are looking to send. remember max 4 digits!" << std::endl;
 	std::getline(std::cin, txvalue);
 	
 	
-	txvalue = FixedPointToWei(txvalue, 4);
+	txvalue = FixedPointToWei(txvalue, 18);
 	int TxNonce;
 	std::stringstream query;
 	
@@ -817,7 +959,6 @@ void SignTAEXTransaction(KeyManager myWallet) {
 	Secret s = getSecret(m_signKey, myWallet);
 	
 	std::stringstream txHexBuffer;
-	std::cout << "Signing transaction" << std::endl;
 	try
 	{
 		TransactionBase t = TransactionBase(m_toSign);
@@ -831,13 +972,11 @@ void SignTAEXTransaction(KeyManager myWallet) {
 	}
 	
 	std::string transactionHex = txHexBuffer.str();
-	
 
-	std::cout << "Transaction signed, broadcasting" << std::endl;
 	
 	std::string transactionLink = SendETHTransaction(transactionHex);
 	
-	while (transactionLink.find("Transaction nonce is too low")  != std::string::npos || transactionLink.find("Transaction with the same hash was already imported")  != std::string::npos) {
+	while (transactionLink.find("Transaction nonce is too low")  != std::string::npos || transactionLink.find("Transaction with the same hash was already imported")  != std::string::npos || transactionLink.find("There is another transaction with same nonce") != std::string::npos) {
 		std::cout << "Transaction nonce is too low. trying again with higher..." << std::endl;
 		txHexBuffer.str(std::string());
 		std::cout << "TxNonce: " << TxNonce << std::endl;
@@ -858,9 +997,6 @@ void SignTAEXTransaction(KeyManager myWallet) {
 		std::string transactionLink = SendETHTransaction(transactionHex);
 	}
 	
-	
-	std::cout << "Transaction signed! Link: " << transactionLink << std::endl;
-	
 	return;
 }
 
@@ -876,11 +1012,219 @@ KeyManager LoadWallet() {
 		wallet = CreateNewWallet(false);
 	} else {
 		std::cout << "Default wallet found, do you still want to load or create an different wallet?\n1 - No\n2 - Yes" << std::endl;
-		int user_answer;
-		std::cin >> user_answer;
-		if (user_answer == 2) {
+		std::string user_answer;
+		std::getline(std::cin, user_answer);
+		if (user_answer == "2") {
 			wallet = CreateNewWallet(true);
 		}
 	}
 	return wallet;
+}
+
+std::string GetMinerAddress(KeyManager mywallet) {
+	for (auto const& u: mywallet.store().keys()) {
+		AddressHash got;
+		if (Address a = mywallet.address(u)) {
+			got.insert(a);
+			std::cout << a << std::endl;
+			return boost::lexical_cast<std::string>(a);
+		}
+	}
+	return "";
+}
+
+std::string getnNonceHex(u256 nNonce) {
+	std::string nNonceHex = "0000000000000000000000000000000000000000000000000000000000000000";
+	std::string tmpnNonceHex;
+	std::stringstream ss;
+	ss << std::hex << nNonce;
+	tmpnNonceHex = ss.str();
+	
+	for (auto &c : tmpnNonceHex) {
+		if (std::isupper(c)) {
+			c = std::tolower(c);
+		}
+	}
+	
+	for (size_t i = (tmpnNonceHex.size() - 1), x = (nNonceHex.size() -1), counter = 0; counter < tmpnNonceHex.size(); --i, --x, ++counter) {
+		nNonceHex[x] = tmpnNonceHex[i];
+	}
+	
+	return nNonceHex;
+}
+
+double diffclock(std::clock_t clock1,std::clock_t clock2)
+{
+    int64_t diffticks=clock1-clock2;
+    double diffms=(diffticks)/(CLOCKS_PER_SEC/1000);
+    return diffms;
+}
+
+void miner(safeTarget &currentTarget, safeWork &currentWork, MiningStatus &currentStatus, Secret s, std::string minerAddress, int threadID) {
+	std::cout << "Starting Miner: " << threadID << std::endl;
+	
+	u256 nNonce = 0;
+	u256 solution;
+	int64_t hashes = 0;
+	u256 myTarget;
+	std::string myWork;
+	currentTarget.get(myTarget);
+	currentWork.get(myWork);
+	
+	int64_t time_start = std::clock();
+
+	while(!stop_thread) {
+		if (work_submitted) {
+			while (!work_changed || !target_changed) { // After submitting an new work, the target should also change accordingly.
+				boost::this_thread::sleep_for(boost::chrono::milliseconds(250));
+			}
+			currentTarget.get(myTarget);
+			currentWork.get(myWork);
+			work_changed = false;
+			work_submitted = false;
+			target_changed = false;
+
+
+		} else if (target_changed) { // Work can only change when the user submit an job, work are address specific so only target can change without miner input.
+			while (!target_changed)
+				boost::this_thread::sleep_for(boost::chrono::milliseconds(250));
+
+			currentTarget.get(myTarget);
+			currentWork.get(myWork);
+			work_changed = false;
+			work_submitted = false;
+			target_changed = false;
+
+		}
+		std::string job = myWork + minerAddress + getnNonceHex(nNonce);
+
+		std::string solutionHex = toHex(dev::sha3(job, true));
+
+		std::stringstream ss;
+		ss << std::hex << solutionHex;
+		ss >> solution;
+		
+		if (hashes % hashes_timer == 0) {
+			currentStatus.statusLock.lock();
+			currentStatus.AverageHash = boost::lexical_cast<std::string>((hashes / (diffclock(std::clock(), time_start) / 1000)));
+			currentStatus.statusLock.unlock();
+			hashes = 0;
+			time_start = std::clock();
+		}
+		
+
+		if ((solution < myTarget) && !work_submitted) {
+			SignWorkTransaction(s, minerAddress, getnNonceHex(nNonce));
+			work_submitted = true;
+			currentStatus.statusLock.lock();
+			++currentStatus.solutionsFound;
+			currentStatus.statusLock.unlock();
+		}
+		++hashes;
+		++nNonce;
+	}
+	
+	return;
+}
+
+void getCurrentWork(safeWork &currentWork, std::string minerAddress) {
+	
+	std::string apiWork;
+	std::stringstream query;
+	
+	query << "/api?module=proxy&action=eth_call&to=0x407DcE91060Ee45dE7b8B7013Ea1f323ec4285FC&data=0x83a0a6e1000000000000000000000000";
+	query << minerAddress;
+	query << "&tag=latest&apikey=6342MIVP4CD1ZFDN3HEZZG4QB66NGFZ6RZ";
+	
+	apiWork = httpGetRequest(query.str());
+	
+	json_spirit::mValue jsonResult;
+	json_spirit::read_string(apiWork, jsonResult);
+	std::string finalWork = objectItem(jsonResult, "result").get_str();
+	
+	if (finalWork[0] == '0' && finalWork[1] == 'x')
+		finalWork.erase(0,2);
+	
+	std::string savedWork;
+	currentWork.get(savedWork);
+	
+	if (savedWork != finalWork) {
+		work_changed = true;
+	}
+	
+	currentWork.set(finalWork);
+
+	return;
+}
+
+void getCurrentTarget(safeTarget &currentTarget) {
+	
+	std::string apiWork;
+	std::stringstream query;
+	
+	query << "/api?module=proxy&action=eth_call&to=0x407DcE91060Ee45dE7b8B7013Ea1f323ec4285FC&data=0xb5c0418f&tag=latest&apikey=6342MIVP4CD1ZFDN3HEZZG4QB66NGFZ6RZ";
+	
+	apiWork = httpGetRequest(query.str());
+	
+	json_spirit::mValue jsonResult;
+    json_spirit::read_string(apiWork, jsonResult);
+    std::string finalTarget = objectItem(jsonResult, "result").get_str();
+	
+	u256 savedTarget;
+	currentTarget.get(savedTarget);
+	u256 uTarget = boost::lexical_cast<HexTo<u256>>(finalTarget);
+	
+	if (savedTarget != uTarget) {
+		target_changed = true;
+	}
+	currentTarget.set(uTarget);
+
+	return;
+}
+
+void targetThread(safeTarget &currentTarget) {
+	while(!stop_thread) {
+		boost::this_thread::sleep_for(boost::chrono::seconds(1));
+		getCurrentTarget(boost::ref(currentTarget));
+	}
+	return;
+}
+
+void workThread(safeWork &currentWork, std::string minerAddress) {
+	while(!stop_thread) {
+		boost::this_thread::sleep_for(boost::chrono::seconds(1));
+		getCurrentWork(boost::ref(currentWork), minerAddress);
+	}
+}
+
+
+void StartMining(KeyManager myWallet, MiningStatus &currentStatus) {
+	stop_thread = false;
+	static safeTarget currentTarget;
+	static safeWork currentWork;
+	std::string minerAddress = GetMinerAddress(myWallet);
+	if (minerAddress == "")
+		return;
+
+	std::cout << "Please inform the password of your miner account..." << std::endl;
+	Secret s = getSecret(minerAddress, myWallet);
+
+	getCurrentTarget(currentTarget);
+	getCurrentWork(currentWork, minerAddress);
+	
+	target_changed = false;
+	work_changed = false;
+
+	boost::thread minerThread(miner, boost::ref(currentTarget), boost::ref(currentWork), boost::ref(currentStatus), s, minerAddress, 1);
+
+	minerThread.detach();
+	currentStatus.CoresRunning = 1;
+	
+	boost::thread workThreadStart(workThread, boost::ref(currentWork), minerAddress);
+	boost::thread targetThreadStart(targetThread, boost::ref(currentTarget));
+	workThreadStart.detach();
+	targetThreadStart.detach();
+
+	
+	return;
 }

@@ -19,7 +19,7 @@
 
 int main () {
 
-	std::cout << "Hello! Welcome to the TAEX CLI wallet" << std::endl;
+	std::cout << "Hello! Welcome to the ProcProc CLI wallet" << std::endl;
 	
 	// Setup logging options to default so we don't have thousands of debug strings when using this program
 	dev::LoggingOptions loggingOptions;
@@ -29,49 +29,43 @@ int main () {
 	dev::eth::KeyManager wallet = LoadWallet();
 	std::cout << "Wallet loaded." << std::endl;
 
+	std::vector<boost::thread> MiningThreads;
+	MiningStatus currentStatus;
+	ListETHAddresses(wallet);
+	wallet = LoadWallet();
 	while (true) {
 		std::cout << "What you are looking to do today?\n" <<
 			"1 - List accounts and ETH balances\n" <<
-			"2 - List accounts and TAEX balances\n" <<
+			"2 - List accounts and ProcProc balances\n" <<
 			"3 - Send an ETH Transaction\n" << 
-			"4 - Send an TAEX Transaction\n" <<
-			"5 - Create an new account\n" <<
-			"6 - Erase account\n" <<
-			"7 - Create private key from Word/Phrase" << std::endl;
-		// Cin.clear and fflush to clean input, remove these and you will see some stupid bugs that happens
-		cin.clear();
-		fflush(stdin);
-		int userinput;
-		std::cin >> userinput;
-		if (userinput == 1) {
+			"4 - Send an ProcProc Transaction\n" <<
+			"5 - Start Mining\n" <<
+			"6 - Stop Mining\n" <<
+			"7 - Print mining Status\n" <<
+			"8 - Exit Wallet\n";
+
+		std::string userinput;
+		std::getline(std::cin, userinput);
+		if (userinput == "1") {
 			ListETHAddresses(wallet);
-		} else if (userinput == 2) {
-			ListTAEXAddresses(wallet);
-		} else if (userinput == 3) {
+		} else if (userinput == "2") {
+			ListProcProcAddresses(wallet);
+		} else if (userinput == "3") {
 			SignETHTransaction(wallet);
-		} else if (userinput == 4) {
-			SignTAEXTransaction(wallet);
-		} else if (userinput == 5) {
-			std::string m_name;
-			std::cout << "Please inform an account name" << std::endl;
-			std::cin.clear();
-			std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-			std::getline(std::cin, m_name);
-			CreateNewAccount(wallet, m_name);
-			std::cout << "Reloading account..." << std::endl;
-			wallet = LoadWallet();
-		} else if (userinput == 6) {
-			EraseAccount(wallet);
-			std::cout << "Reloading account..." << std::endl;
-			wallet = LoadWallet();
-		} else if (userinput == 7) {
-			std::string my_passphrase;
-			std::cout << "Please input the passphrase for the wallet" << std::endl;
-			std::cin.clear();
-			std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-			std::getline(std::cin, my_passphrase);
-			CreateFromPassphrase(my_passphrase);
-		} else if (userinput == 8) {
+		} else if (userinput == "4") {
+			SignProcProcTransaction(wallet);
+		} else if (userinput == "5") {
+			StartMining(wallet, currentStatus);
+		} else if (userinput == "6") {
+			stop_thread = true;
+			std::cout << "Mining Stopped... please wait few second before trying to mine again!" << std::endl;
+		} else if (userinput == "7") {
+			currentStatus.statusLock.lock();
+			std::cout << "Cores running: " << currentStatus.CoresRunning << std::endl;
+			std::cout << "Average Hashrate: " << boost::lexical_cast<double>(currentStatus.AverageHash) * currentStatus.CoresRunning << " H/s" << std::endl;
+			std::cout << "Solutions Found: " << currentStatus.solutionsFound << std::endl;
+			currentStatus.statusLock.unlock();
+		} else if (userinput == "8") {
 			break;
 		} else {
 			std::cout << "Wrong input, please check again" << std::endl;

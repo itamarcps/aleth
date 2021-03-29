@@ -104,7 +104,7 @@ public:
 	Address address(h128 const& _uuid) const { return m_keys.at(_uuid).address; }
 
 	/// @returns the default path for the managed directory.
-	static boost::filesystem::path defaultPath() { return getDataDir("web3") / boost::filesystem::path("keys"); }
+	static boost::filesystem::path defaultPath() { return getDataDir("ProcProc") / boost::filesystem::path("keys"); }
 
 private:
 	/// Loads all keys in the given directory.
